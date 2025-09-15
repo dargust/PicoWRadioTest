@@ -126,7 +126,20 @@ if __name__ == "__main__":
     ARM_THRESHOLD = 1000  # Value above which is considered "armed"
     THROTTLE_CHANNEL = 2  # Throttle channel index (0-based)
     THROTTLE_HIGH = 600  # Value above which is considered "high throttle"
-    THROTTLE_HOLD_MS = 4000  # How long throttle must be high to turn off LEDs
+    THROTTLE_MIN = 200   # Approx. min raw value for 0% throttle (tune)
+    THROTTLE_MAX = 1800  # Approx. max raw value for 100% throttle (tune)
+    # New: roll/pitch channels and stick behavior
+    ROLL_CHANNEL = 0
+    PITCH_CHANNEL = 1
+    STICK_MID = 1024  # CRSF 11-bit center
+    STICK_DEADZONE = 300  # Deflection required to enable direction mode
+    INVERT_ROLL = False   # Set True if left/right appear swapped
+    INVERT_PITCH = False  # Set True if forward/back appear swapped
+    # Directional display tuning
+    DIR_SIGMA = 0.85      # Gaussian width in LEDs (controls 2-3 LED fade)
+    DIR_MAX_BRIGHT = 255  # Max brightness at full deflection
+    MIN_DEADZONE_GLOW = 0.02  # Fraction of throttle color used when stick is centered
+    THROTTLE_HOLD_MS = 1500  # How long throttle must be high to turn off LEDs
 
     # WS2812 (NeoPixel) setup
     NEOPIXEL_PIN = 15  # Change as needed
@@ -161,44 +174,264 @@ if __name__ == "__main__":
         else:
             return v_, p, q
 
+    # --- Sticky idle sub-mode selection ---
+    submode_selected = 0
+
+    # --- Persistent color state for color wipe ---
+    color_wipe_state = [(0,0,0)] * NUM_PIXELS
+
+    # --- Persistent state for takeoff red fade ---
+    fade_start_ms = None
+
     def display_mode_update(display_mode=0, target_float=0.0, colour_hue=0.0):
-        # Animate LEDs with a looping effect: distance wraps around the ends
+        global submode_selected
         if display_mode == 0:
-            target_pos = target_float * (NUM_PIXELS - 1)
-            for i in range(NUM_PIXELS):
-                # Calculate shortest distance on a ring (loop)
-                dist = min(abs(i - target_pos), NUM_PIXELS - abs(i - target_pos))
-                # Stronger falloff: increase the exponent denominator
-                brightness = int(100 * math.exp(-dist * 2.0))
-                brightness = max(0, min(255, brightness))
-                # Convert hue (0..1) to RGB using helper
-                r, g, b = hsv_to_rgb(colour_hue % 1.0, 1.0, brightness / 255.0)
-                np[i] = (r, g, b)
+            rx = roll_val - STICK_MID
+            ry = pitch_val - STICK_MID
+            SUBMODE_DEADZONE = 200
+            # Only update submode_selected if stick is outside deadzone
+            if abs(rx) > SUBMODE_DEADZONE or abs(ry) > SUBMODE_DEADZONE:
+                if abs(rx) > abs(ry):
+                    if rx > SUBMODE_DEADZONE:
+                        submode_selected = 1  # right: color wipe
+                    elif rx < -SUBMODE_DEADZONE:
+                        submode_selected = 3  # left: segment pulse
+                else:
+                    if ry > SUBMODE_DEADZONE:
+                        submode_selected = 0  # forward: comet
+                    elif ry < -SUBMODE_DEADZONE:
+                        submode_selected = 2  # back: twinkle
+
+            # --- Idle sub-mode 0: Comet (forward) ---
+            if submode_selected == 0:
+                comet_len = 5
+                comet_speed = 0.5  # rotations/sec
+                t = (time.ticks_ms() / 1000.0) * comet_speed
+                comet_pos = (t % 1.0) * NUM_PIXELS
+                for i in range(NUM_PIXELS):
+                    d = min(abs(i - comet_pos), NUM_PIXELS - abs(i - comet_pos))
+                    fade = math.exp(-d * 1.2)
+                    brightness = int(200 * fade)
+                    if brightness < 2:
+                        np[i] = (0, 0, 0)
+                    else:
+                        r, g, b = hsv_to_rgb((colour_hue + 0.1) % 1.0, 1.0, brightness / 255.0)
+                        np[i] = (r, g, b)
+
+            # --- Idle sub-mode 1: Color Wipe (right) ---
+            elif submode_selected == 1:
+                global color_wipe_state
+                wipe_speed = 0.25  # rotations/sec
+                t = (time.ticks_ms() / 1000.0) * wipe_speed
+                wipe_pos = (t % 1.0) * NUM_PIXELS
+                wipe_width = 1  # single point; increase for a tail
+                # When wipe passes over an LED, update its color
+                for i in range(NUM_PIXELS):
+                    d = (i - wipe_pos + NUM_PIXELS) % NUM_PIXELS
+                    if 0 <= d < wipe_width:
+                        # Overwrite with new color at full brightness
+                        r, g, b = hsv_to_rgb(colour_hue, 1.0, 1.0)
+                        color_wipe_state[i] = (r, g, b)
+                # Draw all LEDs at half brightness of their stored color
+                for i in range(NUM_PIXELS):
+                    r, g, b = color_wipe_state[i]
+                    np[i] = (r//2, g//2, b//2)
+                # Draw the wipe at full brightness (overwriting half-bright)
+                for i in range(NUM_PIXELS):
+                    d = (i - wipe_pos + NUM_PIXELS) % NUM_PIXELS
+                    if 0 <= d < wipe_width:
+                        r, g, b = color_wipe_state[i]
+                        np[i] = (r, g, b)
+
+            # --- Idle sub-mode 2: Twinkle (back) ---
+            elif submode_selected == 2:
+                twinkle_count = 4  # Number of 'on' LEDs in the pattern
+                twinkle_period = 0.5  # seconds per pattern shift
+                t = int(time.ticks_ms() / (twinkle_period * 1000))
+                for i in range(NUM_PIXELS):
+                    # Create a moving pattern: every Nth LED is on, pattern shifts by t
+                    if (i + t) % (NUM_PIXELS // twinkle_count) == 0:
+                        r, g, b = hsv_to_rgb((colour_hue + i / NUM_PIXELS) % 1.0, 0.2, 1.0)
+                        np[i] = (r, g, b)
+                    else:
+                        np[i] = (0, 0, 0)
+
+            # --- Idle sub-mode 3: Segment Pulse (left) ---
+            elif submode_selected == 3:
+                segs = [range(0,6), range(6,12), range(12,18), range(18,24)]
+                pulse_speed = 1.0  # cycles/sec
+                t = (time.ticks_ms() / 1000.0) * pulse_speed
+                seg_idx = int((t % 4))
+                for i in range(NUM_PIXELS):
+                    if i in segs[seg_idx]:
+                        r, g, b = hsv_to_rgb((colour_hue + seg_idx * 0.25) % 1.0, 1.0, 1.0)
+                        np[i] = (r, g, b)
+                    else:
+                        np[i] = (0, 0, 0)
         elif display_mode == 1:
-            # All leds slowly pulse red when armed
-            brightness = int((math.sin(time.ticks_ms() / 500) + 1) / 2 * 255)
+            # Armed: slow pulsed red (off to half brightness)
+            pulse_speed = 2000  # ms for a full pulse cycle
+            t = (time.ticks_ms() % pulse_speed) / pulse_speed  # 0..1
+            # Sine wave for smooth pulse (0..1)
+            pulse = (math.sin(2 * math.pi * t - math.pi / 2) + 1) / 2
+            brightness = int(128 * pulse)  # 0..128 (half brightness)
             for i in range(NUM_PIXELS):
                 np[i] = (brightness, 0, 0)
-        elif display_mode == 2:
-            # All leds solid green when armed + throttle
-            for i in range(NUM_PIXELS):
-                np[i] = (0, 255, 0)
         elif display_mode == 3:
-            # All leds off after takeoff
+            # Post-takeoff: directional lobe colored by throttle; deadzone shows faint throttle-colored glow
+            rx = roll_val - STICK_MID
+            ry = pitch_val - STICK_MID
+            if INVERT_ROLL:
+                rx = -rx
+            if INVERT_PITCH:
+                ry = -ry
+            # Stick magnitude for lobe brightness
+            mag = (math.sqrt(rx*rx + ry*ry) - STICK_DEADZONE)
+            if mag < 0:
+                mag = 0
+            mag = mag / (STICK_MID - STICK_DEADZONE)
+            if mag > 1:
+                mag = 1
+            # Throttle normalization 0..1 and color ramp green->orange->red
+            t = (throttle_val - THROTTLE_MIN) / (THROTTLE_MAX - THROTTLE_MIN)
+            if t < 0:
+                t = 0
+            if t > 1:
+                t = 1
+            if t <= 0.5:
+                u = t / 0.5  # 0..1
+                base_r = int(0 + (255 - 0) * u)
+                base_g = int(255 + (165 - 255) * u)
+                base_b = 0
+            else:
+                u = (t - 0.5) / 0.5  # 0..1
+                base_r = 255
+                base_g = int(165 + (0 - 165) * u)
+                base_b = 0
+            # Deadzone glow color (always available for blending)
+            glow_r = int(base_r * MIN_DEADZONE_GLOW)
+            glow_g = int(base_g * MIN_DEADZONE_GLOW)
+            glow_b = int(base_b * MIN_DEADZONE_GLOW)
+            # Angle mapping to LED target around ring (align +X to right center)
+            ang = math.atan2(ry, rx)
+            if ang < 0:
+                ang += 2 * math.pi
+            target_pos = (ang * (NUM_PIXELS / (2 * math.pi))) + 8.5
+            target_pos = target_pos % NUM_PIXELS
+            # Gaussian lobe across ring
+            two_sigma2 = 2 * DIR_SIGMA * DIR_SIGMA
+            # Smooth fade between glow (0) and lobe (1)
+            blend = mag * mag * (3 - 2 * mag)  # smoothstep
+            inv_blend = 1.0 - blend
             for i in range(NUM_PIXELS):
-                np[i] = (0, 0, 0)
+                d = abs(i - target_pos)
+                d = min(d, NUM_PIXELS - d)
+                w = math.exp(-(d * d) / two_sigma2)
+                # Lobe intensity (do not multiply by mag; blend handles strength)
+                lr = int(base_r * w)
+                lg = int(base_g * w)
+                lb = int(base_b * w)
+                r = int(glow_r * inv_blend + lr * blend)
+                g = int(glow_g * inv_blend + lg * blend)
+                b = int(glow_b * inv_blend + lb * blend)
+                # Clamp
+                if r < 0: r = 0
+                if g < 0: g = 0
+                if b < 0: b = 0
+                if r > 255: r = 255
+                if g > 255: g = 255
+                if b > 255: b = 255
+                np[i] = (r, g, b)
+        elif display_mode == 2:
+            # Takeoff: flash pairs of side LEDs from back to front, and fade out red on 0,5,12,17
+            global fade_start_ms
+            pairs = [(23,6), (22,7), (21,8), (20,9), (19,10), (18,11)]
+            num_pairs = len(pairs)
+            fade_leds = [0, 5, 12, 17]
+            now_ms = time.ticks_ms()
+            # Latch fade start time when entering takeoff mode
+            if fade_start_ms is None:
+                fade_start_ms = now_ms
+            fade_elapsed = now_ms - fade_start_ms
+            if fade_elapsed < THROTTLE_HOLD_MS:
+                fade_phase = fade_elapsed / THROTTLE_HOLD_MS
+                fade_val = int(255 * (1.0 - fade_phase))
+            else:
+                fade_val = 0
+            # Green wave: always fast
+            flash_speed = 20.0  # pairs per second (adjust as desired)
+            t = (now_ms / 1000.0) * flash_speed
+            idx = int(t) % num_pairs
+            on_leds = pairs[idx]
+            for i in range(NUM_PIXELS):
+                if i in on_leds:
+                    np[i] = (0, 255, 0)
+                elif i in fade_leds:
+                    np[i] = (fade_val, 0, 0)
+                else:
+                    np[i] = (0, 0, 0)
+        # Reset fade latch when not in takeoff mode
+        else:
+            global fade_start_ms
+            fade_start_ms = None
+        if display_mode == 4:
+            # Precise directional highlight with per-LED fade around ring
+            # LED layout: Back[0..5], Right[6..11], Front[12..17], Left[18..23]
+            # Compute deflection vector and normalize
+            rx = roll_val - STICK_MID
+            ry = pitch_val - STICK_MID
+            if INVERT_ROLL:
+                rx = -rx
+            if INVERT_PITCH:
+                ry = -ry
+            # Magnitude for brightness scaling (0..1)
+            mag = (math.sqrt(rx*rx + ry*ry) - STICK_DEADZONE)
+            if mag < 0:
+                mag = 0
+            mag = mag / (STICK_MID - STICK_DEADZONE)
+            if mag > 1:
+                mag = 1
+            if mag == 0:
+                for i in range(NUM_PIXELS):
+                    np[i] = (0, 0, 0)
+                np.write()
+                return
+            # Angle of vector (rx, ry), atan2 returns angle from +X
+            ang = math.atan2(ry, rx)
+            if ang < 0:
+                ang += 2 * math.pi
+            # Map angle to LED index around ring; ensure +X (right) -> center of right segment (8.5)
+            target_pos = (ang * (NUM_PIXELS / (2 * math.pi))) + 8.5
+            # Wrap into [0, NUM_PIXELS)
+            target_pos = target_pos % NUM_PIXELS
+            # Gaussian falloff around target_pos with circular distance
+            two_sigma2 = 2 * DIR_SIGMA * DIR_SIGMA
+            max_b = int(DIR_MAX_BRIGHT * mag)
+            for i in range(NUM_PIXELS):
+                d = abs(i - target_pos)
+                d = min(d, NUM_PIXELS - d)
+                w = math.exp(-(d * d) / two_sigma2)
+                b = int(max_b * w)
+                if b < 2:
+                    np[i] = (0, 0, 0)
+                else:
+                    # Use cool white for clarity
+                    np[i] = (b, b, b)
         np.write()
 
     def on_arm(val):
-        global armed, display_mode, post_takeoff
+        global armed, display_mode, post_takeoff, fade_start_ms
         armed = val > ARM_THRESHOLD
+        if armed:
+            fade_start_ms = None  # Reset fade on arming
         if not armed:
             # Disarm: turn off post_takeoff mode
             post_takeoff = False
         update_display_mode()
 
     def on_throttle(val):
-        global throttle_high, display_mode, throttle_high_start, was_throttle_high, armed
+        global throttle_high, display_mode, throttle_high_start, was_throttle_high, armed, throttle_val
+        throttle_val = val
         throttle_high = val > THROTTLE_HIGH
         # Only start timer when armed and throttle just went high
         if armed and throttle_high and not was_throttle_high:
@@ -212,6 +445,24 @@ if __name__ == "__main__":
     parser.register_callback(2, on_throttle)
     parser.register_callback(ARM_CHANNEL, on_arm)
 
+    # Track roll/pitch for directional idle mode
+    roll_val = STICK_MID
+    pitch_val = STICK_MID
+    throttle_val = THROTTLE_MIN
+
+    def on_roll(val):
+        global roll_val
+        roll_val = val
+        update_display_mode()
+
+    def on_pitch(val):
+        global pitch_val
+        pitch_val = val
+        update_display_mode()
+
+    parser.register_callback(ROLL_CHANNEL, on_roll)
+    parser.register_callback(PITCH_CHANNEL, on_pitch)
+
     # LED status patterns
     def led_flash_pattern(pattern, duration_ms=1000):
         # pattern: list of (on, ms) tuples
@@ -222,7 +473,7 @@ if __name__ == "__main__":
                 time.sleep_ms(ms_)
 
     # --- Non-blocking display mode state ---
-    display_mode = 0  # 0=idle animation, 1=armed, 2=armed+throttle, 3=post takeoff
+    display_mode = 0  # 0=idle animation, 1=armed, 2=armed+throttle, 3=post takeoff, 4=idle directional
     armed = False
     throttle_high = False
     post_takeoff = False
@@ -243,7 +494,17 @@ if __name__ == "__main__":
         elif armed:
             display_mode = 1
         else:
-            display_mode = 0
+            # Idle: switch to directional when stick deflected beyond deadzone
+            rx = roll_val - STICK_MID
+            ry = pitch_val - STICK_MID
+            if INVERT_ROLL:
+                rx = -rx
+            if INVERT_PITCH:
+                ry = -ry
+            if (abs(rx) > STICK_DEADZONE) or (abs(ry) > STICK_DEADZONE):
+                display_mode = 4
+            else:
+                display_mode = 0
 
     # Main loop with status detection
     last_print = time.ticks_ms()
@@ -251,6 +512,8 @@ if __name__ == "__main__":
     while True:
         parser.parse()
         now = time.ticks_ms()
+        # Continuously re-evaluate display mode to catch stick changes in idle
+        update_display_mode()
         # Periodic print of first 8 channel values
         if time.ticks_diff(now, last_print) > PRINT_INTERVAL:
             safe_print("Channels:", parser.last_channels[:8])
