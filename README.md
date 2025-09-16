@@ -1,10 +1,10 @@
 copy main.py into a micropython flashed raspberry pi pico w
 
-led pin is dio24
+led pin is DIO24
 
-elrs is using uart 1 (DIO4/5)
+elrs is using UART1 (DIO4/5)
 
-setup to use 24 w2821 leds by default, can be changed
+setup to use 24 WS2821 leds by default, can be changed
 
 reacts to arm/throttle/roll/pitch inputs
 
