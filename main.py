@@ -133,6 +133,7 @@ if __name__ == "__main__":
     PITCH_CHANNEL = 1
     STICK_MID = 1024  # CRSF 11-bit center
     STICK_DEADZONE = 300  # Deflection required to enable direction mode
+    STICK_MAX = 900   # Max deflection for normalization (tune for sharpness)
     INVERT_ROLL = False   # Set True if left/right appear swapped
     INVERT_PITCH = False  # Set True if forward/back appear swapped
     # Directional display tuning
@@ -185,6 +186,23 @@ if __name__ == "__main__":
 
     def display_mode_update(display_mode=0, target_float=0.0, colour_hue=0.0):
         global submode_selected
+        if display_mode == -1:
+            # Standby: LED 0 red (half brightness), LED 1 blue (valid CRSF) or green (valid throttle)
+            for i in range(NUM_PIXELS):
+                np[i] = (0, 0, 0)
+            np[0] = (128, 0, 0)
+            # Determine CRSF and throttle validity
+            now = time.ticks_ms()
+            crsf_valid = (now - parser.last_packet_time) < 300  # 300ms window for valid CRSF
+            throttle_valid = (now - parser.last_rc_update) < 300 and (throttle_val > THROTTLE_MIN + (THROTTLE_MAX - THROTTLE_MIN) * 0.05)
+            if throttle_valid:
+                np[1] = (0, 128, 0)  # green
+            elif crsf_valid:
+                np[1] = (0, 0, 128)  # blue
+            else:
+                np[1] = (128, 0, 0)
+            np.write()
+            return
         if display_mode == 0:
             rx = roll_val - STICK_MID
             ry = pitch_val - STICK_MID
@@ -285,11 +303,11 @@ if __name__ == "__main__":
                 rx = -rx
             if INVERT_PITCH:
                 ry = -ry
-            # Stick magnitude for lobe brightness
-            mag = (math.sqrt(rx*rx + ry*ry) - STICK_DEADZONE)
+            # Stick magnitude for lobe brightness (max axis, so full stick in any direction gives mag=1)
+            mag = (max(abs(rx), abs(ry)) - STICK_DEADZONE)
             if mag < 0:
                 mag = 0
-            mag = mag / (STICK_MID - STICK_DEADZONE)
+            mag = mag / (STICK_MAX - STICK_DEADZONE)
             if mag > 1:
                 mag = 1
             # Throttle normalization 0..1 and color ramp green->orange->red
@@ -430,9 +448,12 @@ if __name__ == "__main__":
         update_display_mode()
 
     def on_throttle(val):
-        global throttle_high, display_mode, throttle_high_start, was_throttle_high, armed, throttle_val
+        global throttle_high, display_mode, throttle_high_start, was_throttle_high, armed, throttle_val, standby_active
         throttle_val = val
         throttle_high = val > THROTTLE_HIGH
+        # Exit standby if throttle exceeds midpoint
+        if standby_active and val > (THROTTLE_MIN + (THROTTLE_MAX - THROTTLE_MIN) // 2):
+            standby_active = False
         # Only start timer when armed and throttle just went high
         if armed and throttle_high and not was_throttle_high:
             throttle_high_start = time.ticks_ms()
@@ -473,7 +494,15 @@ if __name__ == "__main__":
                 time.sleep_ms(ms_)
 
     # --- Non-blocking display mode state ---
-    display_mode = 0  # 0=idle animation, 1=armed, 2=armed+throttle, 3=post takeoff, 4=idle directional
+    # Display modes:
+    # -1 = standby (startup, until throttle > 0.5)
+    # 0 = idle animation
+    # 1 = armed
+    # 2 = armed+throttle
+    # 3 = post takeoff
+    # 4 = idle directional
+    display_mode = -1  # Start in standby mode
+    standby_active = True
     armed = False
     throttle_high = False
     post_takeoff = False
@@ -486,7 +515,11 @@ if __name__ == "__main__":
     
 
     def update_display_mode():
-        global display_mode, armed, throttle_high, post_takeoff
+        global display_mode, armed, throttle_high, post_takeoff, standby_active
+        # Standby mode: until throttle > midpoint
+        if standby_active:
+            display_mode = -1
+            return
         if post_takeoff:
             display_mode = 3
         elif armed and throttle_high:
@@ -512,7 +545,7 @@ if __name__ == "__main__":
     while True:
         parser.parse()
         now = time.ticks_ms()
-        # Continuously re-evaluate display mode to catch stick changes in idle
+        # Always update display mode (standby or normal)
         update_display_mode()
         # Periodic print of first 8 channel values
         if time.ticks_diff(now, last_print) > PRINT_INTERVAL:
