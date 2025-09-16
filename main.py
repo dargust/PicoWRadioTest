@@ -1,7 +1,8 @@
-# crsf_receiver.py
+# crsf_receiver
 # MicroPython CRSF parser for Pico W with LED status indication
 # Reads CRSF packets from UART, parses RC channels, allows channel callbacks, and sends telemetry
 # LED flashes unique codes for receiver status
+# Dacus, 2024-06
 
 from machine import UART, Pin, PWM
 # Detect if USB is connected (VBUS sense on GPIO24)
@@ -21,8 +22,6 @@ CRSF_MAX_CHANNELS = 16
 
 class CRSFParser:
     def __init__(self, uart_id=1, rx_pin=5, tx_pin=4, baudrate=420000):
-        # You can try lowering baudrate (e.g., 115200) if you suspect timing issues
-        # e.g., baudrate=115200
         self.uart = UART(uart_id, baudrate=baudrate, rx=Pin(rx_pin), tx=Pin(tx_pin), rxbuf=512)
         self.buffer_timeout_ms = 20  # Max time to wait for a full packet
         self.last_buffer_time = time.ticks_ms()
@@ -122,25 +121,25 @@ class CRSFParser:
 
 # Example usage with LED status indication
 if __name__ == "__main__":
-    ARM_CHANNEL = 4  # Change to your arm channel index (0-based)
-    ARM_THRESHOLD = 1000  # Value above which is considered "armed"
-    THROTTLE_CHANNEL = 2  # Throttle channel index (0-based)
-    THROTTLE_HIGH = 600  # Value above which is considered "high throttle"
-    THROTTLE_MIN = 200   # Approx. min raw value for 0% throttle (tune)
-    THROTTLE_MAX = 1800  # Approx. max raw value for 100% throttle (tune)
-    # New: roll/pitch channels and stick behavior
+    ARM_CHANNEL = 4
+    ARM_THRESHOLD = 1000
+    THROTTLE_CHANNEL = 2
+    THROTTLE_HIGH = 600
+    THROTTLE_MIN = 200
+    THROTTLE_MAX = 1800
+
     ROLL_CHANNEL = 0
     PITCH_CHANNEL = 1
     STICK_MID = 1024  # CRSF 11-bit center
-    STICK_DEADZONE = 300  # Deflection required to enable direction mode
-    STICK_MAX = 900   # Max deflection for normalization (tune for sharpness)
-    INVERT_ROLL = False   # Set True if left/right appear swapped
-    INVERT_PITCH = False  # Set True if forward/back appear swapped
+    STICK_DEADZONE = 300
+    STICK_MAX = 900   # Max deflection for normalization
+    INVERT_ROLL = False
+    INVERT_PITCH = False
     # Directional display tuning
     DIR_SIGMA = 0.85      # Gaussian width in LEDs (controls 2-3 LED fade)
     DIR_MAX_BRIGHT = 255  # Max brightness at full deflection
     MIN_DEADZONE_GLOW = 0.02  # Fraction of throttle color used when stick is centered
-    THROTTLE_HOLD_MS = 1500  # How long throttle must be high to turn off LEDs
+    THROTTLE_HOLD_MS = 1500  # How long throttle must be high to turn off LEDs after takeoff
 
     # WS2812 (NeoPixel) setup
     NEOPIXEL_PIN = 15  # Change as needed
@@ -196,11 +195,11 @@ if __name__ == "__main__":
             crsf_valid = (now - parser.last_packet_time) < 300  # 300ms window for valid CRSF
             throttle_valid = (now - parser.last_rc_update) < 300 and (throttle_val > THROTTLE_MIN + (THROTTLE_MAX - THROTTLE_MIN) * 0.05)
             if throttle_valid:
-                np[1] = (0, 128, 0)  # green
+                np[1] = (0, 128, 0) # green
             elif crsf_valid:
-                np[1] = (0, 0, 128)  # blue
+                np[1] = (0, 0, 128) # blue
             else:
-                np[1] = (128, 0, 0)
+                np[1] = (128, 0, 0) # red
             np.write()
             return
         if display_mode == 0:
@@ -218,7 +217,7 @@ if __name__ == "__main__":
                     if ry > SUBMODE_DEADZONE:
                         submode_selected = 0  # forward: comet
                     elif ry < -SUBMODE_DEADZONE:
-                        submode_selected = 2  # back: twinkle
+                        submode_selected = 2  # back: pattern
 
             # --- Idle sub-mode 0: Comet (forward) ---
             if submode_selected == 0:
